@@ -1,6 +1,22 @@
 #!/bin/sh
 input=$(cat)
 
+# --- platform icon + hostname ---
+os_type=$(uname -s 2>/dev/null)
+case "$os_type" in
+  Darwin)  platform_icon=$(printf '\xef\x85\xb9') ;;   # U+F179 nf-fa-apple
+  Linux)
+    if [ -f "/system/build.prop" ] || [ -n "$ANDROID_ROOT" ]; then
+      platform_icon=$(printf '\xef\x85\xbb')            # U+F17B nf-fa-android
+    else
+      platform_icon=$(printf '\xef\x85\xbc')            # U+F17C nf-fa-linux
+    fi
+    ;;
+  MINGW*|MSYS*|CYGWIN*) platform_icon=$(printf '\xef\x85\xba') ;;  # U+F17A nf-fa-windows
+  *)                     platform_icon=$(printf '\xef\x84\x89') ;;  # U+F109 nf-fa-laptop
+esac
+host_name=$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo "unknown")
+
 # --- model ---
 model=$(echo "$input" | jq -r '.model.display_name // ""')
 
@@ -8,10 +24,38 @@ model=$(echo "$input" | jq -r '.model.display_name // ""')
 dir=$(echo "$input" | jq -r '.workspace.current_dir // .cwd // ""')
 dir_name=$(basename "$dir")
 
-# --- git branch ---
+# --- git branch + worktree name ---
 branch=""
-if [ -d "${dir}/.git" ] || git -C "$dir" rev-parse --git-dir > /dev/null 2>&1; then
+worktree_name=""
+if git -C "$dir" rev-parse --git-dir > /dev/null 2>&1; then
   branch=$(git -C "$dir" symbolic-ref --short HEAD 2>/dev/null || git -C "$dir" rev-parse --short HEAD 2>/dev/null)
+
+  # Resolve the canonical path of the current worktree dir
+  current_worktree=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)
+
+  if [ -n "$current_worktree" ]; then
+    # Find the main worktree path (always listed first by git worktree list)
+    main_worktree=$(git -C "$dir" worktree list --porcelain 2>/dev/null | awk '/^worktree / { print $2; exit }')
+
+    if [ -n "$main_worktree" ]; then
+      main_basename=$(basename "$main_worktree")
+      current_basename=$(basename "$current_worktree")
+
+      if [ "$current_worktree" = "$main_worktree" ]; then
+        # We are on the main worktree — name it "main"
+        worktree_name="main"
+      else
+        # Strip the main repo basename prefix and the leading dot/separator
+        # e.g. "carroquesi.feat-list-route" → "feat-list-route"
+        suffix="${current_basename#${main_basename}.}"
+        if [ "$suffix" != "$current_basename" ]; then
+          worktree_name="$suffix"
+        else
+          worktree_name="$current_basename"
+        fi
+      fi
+    fi
+  fi
 fi
 
 # --- usage stats (5h / 7d) from cache ---
@@ -33,11 +77,7 @@ fi
 # --- compute_delta: given a raw ISO timestamp, returns human-readable time until reset ---
 compute_delta() {
   clean=$(echo "$1" | sed 's/\.[0-9]*//' | sed 's/[+-][0-9][0-9]:[0-9][0-9]$//' | sed 's/Z$//')
-  # macOS (BSD date): date -j -f; Linux (GNU date): date -d
   reset_epoch=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%S" "$clean" "+%s" 2>/dev/null)
-  if [ -z "$reset_epoch" ]; then
-    reset_epoch=$(date -u -d "${clean}Z" "+%s" 2>/dev/null)
-  fi
   if [ -z "$reset_epoch" ]; then return; fi
   now_epoch=$(date -u "+%s")
   diff=$(( reset_epoch - now_epoch ))
@@ -73,11 +113,18 @@ fi
 # --- assemble output ---
 SEP="\033[90m • \033[0m"
 
-# line 1: model | folder • branch
+# line 1: icon hostname | model | folder • worktree [• branch]
+printf "%s " "$platform_icon"
+printf "\033[38;2;156;162;175m%s\033[0m" "$host_name"
+printf "\033[90m | \033[0m"
 printf "\033[38;5;208m\033[1m%s\033[22m\033[0m" "$model"
 printf "\033[90m | \033[0m"
 printf "\033[1m\033[38;2;76;208;222m%s\033[22m\033[0m" "$dir_name"
-if [ -n "$branch" ]; then
+if [ -n "$worktree_name" ]; then
+  printf "%b" "$SEP"
+  printf "\033[1m\033[38;2;255;185;0m%s\033[22m\033[0m" "$worktree_name"
+fi
+if [ -n "$branch" ] && [ "$branch" != "$worktree_name" ]; then
   printf "%b" "$SEP"
   printf "\033[1m\033[38;2;192;103;222m%s\033[22m\033[0m" "$branch"
 fi
