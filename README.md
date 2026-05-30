@@ -1,6 +1,6 @@
 # claude-watch
 
-![my-minimal-claude-code-statusline-config-v0-bw0th9wf90mg1](https://github.com/user-attachments/assets/05edca4f-749a-433b-b4da-262f840e0a1c)
+![claude-watch statusline](screenshot.png)
 
 ## Installation
 
@@ -30,7 +30,7 @@ The usage cache will otherwise populate automatically on the next tool call or C
 
 ## How it works
 
-- **`statusline-command.sh`** — reads the JSON piped by Claude Code and renders two lines: model/folder/branch, then usage stats and context window.
+- **`statusline-command.sh`** — reads the JSON piped by Claude Code and renders two lines: platform icon (Nerd Font glyph) + hostname + model + folder + worktree/branch, then usage stats and context window.
 - **`fetch-usage.sh`** — reads the OAuth token from `~/.claude/.credentials.json`, caches it in `/tmp/.claude_token_cache` for 15 minutes, hits the `/oauth/usage` endpoint (3s timeout), and writes results to `/tmp/.claude_usage_cache`. On failure the stale cache is preserved.
 - **`settings.json`** — wires up the statusline command and triggers `fetch-usage.sh` in the background on `PreToolUse` and `Stop` hooks.
 
@@ -38,4 +38,5 @@ The usage cache will otherwise populate automatically on the next tool call or C
 
 - `jq`
 - `curl`
-- `git` (optional, for branch display)
+- `git` (optional, for branch/worktree display)
+- [Nerd Fonts](https://www.nerdfonts.com/) (for platform icons)
