@@ -39,8 +39,28 @@ if command -v zmx > /dev/null 2>&1 && [ -n "$ZMX_SESSION" ]; then
   zmx_session="$ZMX_SESSION"
 fi
 
-# --- model ---
+# --- model + reasoning effort ---
+# Both reads go through jq's "//" alternative: .effort is absent on models that
+# have no reasoning parameter, and jq -r renders a missing key as the literal
+# string "null", which would otherwise land in the statusline verbatim.
 model=$(echo "$input" | jq -r '.model.display_name // ""')
+effort=$(echo "$input" | jq -r '.effort.level // ""')
+
+# The suffix stays separate from $model so the two can carry different SGR
+# attributes — bold orange for the name, dim grey for the parenthetical, the same
+# split the ctx and reset-delta segments use. Concatenating loses that seam.
+# "(1M context)" is a context-size marker rather than part of the name, so it
+# moves into the suffix instead of leaving two parentheticals side by side.
+model_suffix=""
+case "$model" in
+  *"(1M context)"*)
+    # printf '%s', not echo: this is a /bin/sh script, and dash's echo expands
+    # backslash escapes in its argument, so a display name is not safe to echo.
+    model=$(printf '%s' "$model" | sed 's/ *(1M context)//')
+    model_suffix="1M"
+    ;;
+esac
+[ -n "$effort" ] && model_suffix="${model_suffix:+$model_suffix }$effort"
 
 # --- leading segment: the repo, or a plain directory when outside one ---
 # Name and icon start as the plain-directory case; whichever SCM block matches
@@ -135,39 +155,35 @@ else
   fi
 fi
 
-# --- usage stats (5h / 7d) from cache ---
-CACHE_FILE="/tmp/.claude_usage_cache"
-five_h=""
-seven_d=""
-five_h_reset=""
-seven_d_reset=""
+# --- usage stats (5h / 7d) ---
+# Claude Code hands these over on stdin, so there is no token, no HTTP call and
+# no cache file to keep warm. The whole rate_limits object is absent until the
+# session's first API response, and each window can go missing independently, so
+# every read is guarded with "// empty" and every segment below stays optional.
+# The percentages are documented as 0-100 and not necessarily whole, so they are
+# rounded — in jq, never with printf "%.0f". printf's float parsing honours
+# LC_NUMERIC: under a comma-decimal locale (es_ES, de_DE, fr_FR...) bash's printf
+# rejects "12.6", writes "invalid number" to stderr and yields 12 instead of 13.
+# jq always parses and prints JSON numbers with a decimal point, locale or not.
+# "// empty" comes first so a missing window stays empty rather than rounding null.
+five_h=$(echo "$input" | jq -r '.rate_limits.five_hour.used_percentage // empty | round')
+seven_d=$(echo "$input" | jq -r '.rate_limits.seven_day.used_percentage // empty | round')
+# floor, not round: resets_at is documented as Unix epoch seconds, but a fractional
+# value would otherwise reach compute_delta's digits-only guard and silently drop
+# the countdown.
+five_h_reset=$(echo "$input" | jq -r '.rate_limits.five_hour.resets_at // empty | floor')
+seven_d_reset=$(echo "$input" | jq -r '.rate_limits.seven_day.resets_at // empty | floor')
 
-if [ -f "$CACHE_FILE" ]; then
-  five_h=$(sed -n '1p' "$CACHE_FILE")
-  seven_d=$(sed -n '2p' "$CACHE_FILE")
-  five_h_reset=$(sed -n '3p' "$CACHE_FILE")
-  seven_d_reset=$(sed -n '4p' "$CACHE_FILE")
-else
-  bash ~/.claude/fetch-usage.sh > /dev/null 2>&1 &
-fi
-
-# --- compute_delta: given a raw ISO timestamp, returns human-readable time until reset ---
+# --- compute_delta: given Unix epoch seconds, returns human-readable time until reset ---
+# resets_at arrives as an integer, which is why there is no date parsing here and
+# no BSD-vs-GNU branch: only arithmetic, identical on every platform.
 compute_delta() {
-  raw="$1"
-  # macOS/BSD date needs an exact format string, so strip fractional seconds and
-  # the UTC offset first and parse the remainder as UTC.
-  clean=$(echo "$raw" | sed 's/\.[0-9]*//' | sed 's/[+-][0-9][0-9]:[0-9][0-9]$//' | sed 's/Z$//')
-  reset_epoch=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%S" "$clean" "+%s" 2>/dev/null)
-  if [ -z "$reset_epoch" ] && date --version > /dev/null 2>&1; then
-    # GNU/Linux date: parses full ISO-8601 natively, so feed it the *raw* string
-    # and let it honour the embedded "+00:00" offset instead of guessing a zone.
-    # Gated on --version, which only GNU date has: on BSD, -d does not parse a
-    # date at all, it *sets the kernel DST value*. Harmless as a normal user
-    # because it fails, but as root a malformed timestamp would change system
-    # state, so never reach that flag on a platform where it means something else.
-    reset_epoch=$(date -d "$raw" "+%s" 2>/dev/null)
-  fi
-  if [ -z "$reset_epoch" ]; then return; fi
+  reset_epoch="$1"
+  # Anything non-numeric would make the $(( )) below a syntax error rather than a
+  # bad result, so reject it up front instead of writing to stderr mid-render.
+  case "$reset_epoch" in
+    ''|*[!0-9]*) return ;;
+  esac
   now_epoch=$(date -u "+%s")
   diff=$(( reset_epoch - now_epoch ))
   if [ "$diff" -le 0 ]; then echo "now"; return; fi
@@ -184,12 +200,12 @@ compute_delta() {
 }
 
 # --- context window ---
-used=$(echo "$input" | jq -r '.context_window.used_percentage // empty')
+# Rounded in jq for the same locale reason as the usage percentages above.
+used=$(echo "$input" | jq -r '.context_window.used_percentage // empty | round')
 ctx_str=""
 ctx_tokens_str=""
 if [ -n "$used" ]; then
-  used_int=$(printf "%.0f" "$used")
-  ctx_str="${used_int}%"
+  ctx_str="${used}%"
   ctx_used=$(echo "$input" | jq -r '(.context_window.current_usage.cache_read_input_tokens + .context_window.current_usage.cache_creation_input_tokens + .context_window.current_usage.input_tokens + .context_window.current_usage.output_tokens) // empty' 2>/dev/null)
   ctx_total=$(echo "$input" | jq -r '.context_window.context_window_size // empty' 2>/dev/null)
   if [ -n "$ctx_used" ] && [ -n "$ctx_total" ]; then
@@ -239,6 +255,7 @@ usage_started=0
 
 if [ -n "$model" ]; then
   printf "\033[38;5;208m\033[1m%s\033[22m\033[0m" "$model"
+  [ -n "$model_suffix" ] && printf " \033[2m\033[38;2;156;162;175m(%s)\033[0m" "$model_suffix"
   line2_empty=0
 fi
 if [ -n "$five_h" ]; then
