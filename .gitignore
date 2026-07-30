@@ -1,0 +1,5 @@
+# macOS
+.DS_Store
+
+# git worktrees (created by `git worktree add .worktrees/<name>`)
+.worktrees/
